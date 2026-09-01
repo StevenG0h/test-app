@@ -12,8 +12,8 @@ export default function WaitingRoomPage({
         <h1>Please wait</h1>
       </header>
       <p>
-        Your session is not active right now, so you&rsquo;ve been placed in the
-        waiting room. When your session becomes valid, click below to check and
+        You don&rsquo;t have a valid token right now, so you&rsquo;ve been placed
+        in the waiting room. When a token is granted, click below to check and
         you&rsquo;ll be let into the app.
       </p>
       <div className="actions">

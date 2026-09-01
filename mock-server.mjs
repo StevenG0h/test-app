@@ -3,24 +3,54 @@
  *
  * Run with:  npm run mock   (starts on http://localhost:8787)
  *
- * Endpoints (mirror what a real waiting-room service would do):
- *   GET  /api/session/validate  -> 200 {active:true} if the session cookie is
- *                                  present, otherwise 401
- *   GET  /api/session/revoke    -> clears the session cookie, 200
- *   GET  /api/session/grant     -> sets a session cookie and redirects back to
- *                                  the app (use from the waiting-room page)
- *   GET  /waiting-room          -> standalone "waiting room" page (optional;
- *                                  the app now shows its own in-app waiting
- *                                  room instead of redirecting here)
+ * Endpoints (mirror the Go/Fiber waiting-room backend):
+ *   POST /api/token/request                  -> 200 {token, session} pass-through
+ *                                              -> 200 {message}      joined the queue
+ *                                              -> 200 {token}        existing session
+ *   GET  /api/token/validate?token=...       -> 200 {message} valid | 400 invalid/expired
+ *   GET  /api/token/invalidate?token=...&userId=... -> 200 | 400 invalid/expired
+ *   GET  /api/token/grant                    -> grants a token for the session
+ *                                              (lets you in) and sets the cookie
+ *   GET  /waiting-room                       -> standalone "waiting room" page
+ *
+ * By default the first token request joins the queue. Set MOCK_PASS_THROUGH=1
+ * to make it pass straight through instead. Use /api/token/grant to get a
+ * token while waiting in the queue.
  *
  * It sends CORS headers so the Vite dev server (a different origin on
  * localhost) can call it with credentials.
  */
+import crypto from 'node:crypto'
 import http from 'node:http'
 
 const PORT = Number(process.env.MOCK_PORT ?? 8787)
 const COOKIE_NAME = process.env.SESSION_COOKIE ?? 'session'
 const APP_URL = process.env.APP_URL ?? 'http://localhost:5173'
+const PASS_THROUGH = process.env.MOCK_PASS_THROUGH === '1'
+
+// In-memory tokens, keyed by user id. A user is in the queue until a token is
+// granted (valid = true).
+const tokens = new Map()
+
+function getSessionUserId(req) {
+  const cookie = (req.headers.cookie ?? '')
+    .split(';')
+    .map((c) => c.trim())
+    .find((c) => c.startsWith(`${COOKIE_NAME}=`))
+  return cookie ? decodeURIComponent(cookie.slice(COOKIE_NAME.length + 1)) : null
+}
+
+function sendJson(res, status, body, extra = {}) {
+  res.writeHead(status, { 'Content-Type': 'application/json', ...extra })
+  res.end(JSON.stringify(body))
+}
+
+function setSessionCookie(res, userId) {
+  res.setHeader(
+    'Set-Cookie',
+    `${COOKIE_NAME}=${encodeURIComponent(userId)}; Path=/; Max-Age=3600; SameSite=Lax`,
+  )
+}
 
 const server = http.createServer((req, res) => {
   const url = new URL(req.url ?? '/', `http://localhost:${PORT}`)
@@ -39,36 +69,69 @@ const server = http.createServer((req, res) => {
     return
   }
 
-  const hasCookie = (req.headers.cookie ?? '')
-    .split(';')
-    .some((c) => c.trim().startsWith(`${COOKIE_NAME}=`))
+  const userId = getSessionUserId(req)
 
-  if (url.pathname === '/api/session/validate' && req.method === 'GET') {
-    if (hasCookie) {
-      res.writeHead(200, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify({ active: true }))
+  // POST /api/token/request — the waiting-room entry point.
+  if (url.pathname === '/api/token/request' && req.method === 'POST') {
+    if (!userId) {
+      // First visit: either pass straight through or join the queue.
+      const id = crypto.randomUUID()
+      if (PASS_THROUGH) {
+        const record = { token: `tok-${id}`, valid: true }
+        tokens.set(id, record)
+        setSessionCookie(res, id)
+        sendJson(res, 200, { token: record.token, session: id })
+      } else {
+        tokens.set(id, { token: null, valid: false })
+        setSessionCookie(res, id)
+        sendJson(res, 200, { message: 'User has joined the queue please wait' })
+      }
+      return
+    }
+
+    // Returning visitor: hand back the token if one has been granted.
+    const record = tokens.get(userId)
+    if (record?.token && record.valid) {
+      sendJson(res, 200, { token: record.token })
     } else {
-      res.writeHead(401, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify({ active: false }))
+      sendJson(res, 200, { message: 'User has joined the queue please wait' })
     }
     return
   }
 
-  if (url.pathname === '/api/session/revoke' && (req.method === 'GET' || req.method === 'POST')) {
-    res.writeHead(200, {
-      'Content-Type': 'application/json',
-      'Set-Cookie': `${COOKIE_NAME}=; Path=/; Max-Age=0; SameSite=Lax`,
-    })
-    res.end(JSON.stringify({ revoked: true }))
+  // GET /api/token/validate?token=... — checks the token is valid.
+  if (url.pathname === '/api/token/validate' && req.method === 'GET') {
+    const token = url.searchParams.get('token')
+    const record = userId ? tokens.get(userId) : undefined
+    if (!token || !record || record.token !== token || !record.valid) {
+      sendJson(res, 400, { message: 'Invalid or expired token' })
+    } else {
+      sendJson(res, 200, { message: 'Token is valid' })
+    }
     return
   }
 
-  if (url.pathname === '/api/session/grant' && req.method === 'GET') {
-    res.writeHead(302, {
-      Location: `${APP_URL}/`,
-      'Set-Cookie': `${COOKIE_NAME}=granted-${Date.now()}; Path=/; Max-Age=3600; SameSite=Lax`,
-    })
-    res.end()
+  // GET /api/token/invalidate?token=...&userId=... — invalidates the token.
+  if (url.pathname === '/api/token/invalidate' && req.method === 'GET') {
+    const token = url.searchParams.get('token')
+    const targetId = url.searchParams.get('userId') ?? userId
+    const record = targetId ? tokens.get(targetId) : undefined
+    if (!token || !record || record.token !== token || !record.valid) {
+      sendJson(res, 400, { message: 'Invalid or expired token' })
+    } else {
+      record.valid = false
+      sendJson(res, 200, { message: 'Token invalidated successfully' })
+    }
+    return
+  }
+
+  // GET /api/token/grant — grants a token for the current session (lets you in).
+  if (url.pathname === '/api/token/grant' && req.method === 'GET') {
+    const id = userId ?? crypto.randomUUID()
+    const record = { token: `tok-${id}`, valid: true }
+    tokens.set(id, record)
+    setSessionCookie(res, id)
+    sendJson(res, 200, { token: record.token, session: id })
     return
   }
 
@@ -93,8 +156,10 @@ const server = http.createServer((req, res) => {
 server.listen(PORT, () => {
   console.log(`Mock waiting room server listening on http://localhost:${PORT}`)
   console.log(`  App URL:        ${APP_URL}`)
-  console.log(`  Validate:       GET  /api/session/validate`)
-  console.log(`  Revoke:         GET  /api/session/revoke`)
-  console.log(`  Grant:          GET  /api/session/grant`)
+  console.log(`  Request:        POST /api/token/request`)
+  console.log(`  Validate:       GET  /api/token/validate?token=`)
+  console.log(`  Invalidate:     GET  /api/token/invalidate?token=&userId=`)
+  console.log(`  Grant:          GET  /api/token/grant`)
   console.log(`  Waiting room:   GET  /waiting-room`)
+  console.log(`  Pass-through:   ${PASS_THROUGH ? 'on' : 'off (first request joins the queue)'}`)
 })

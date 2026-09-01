@@ -11,7 +11,7 @@ function getRoute(): string {
 
 export default function App({ config }: { config: AppConfig }) {
   const [route, setRoute] = useState(getRoute)
-  const { state, retry } = useSessionGuard(config.validateUrl)
+  const { state, checkAgain } = useSessionGuard(config.requestTokenUrl, config.validateTokenUrl)
 
   useEffect(() => {
     const handleHashChange = () => setRoute(getRoute())
@@ -21,18 +21,17 @@ export default function App({ config }: { config: AppConfig }) {
 
   switch (state.phase) {
     case 'checking':
-      return <Splash label="Checking session…" />
+      return <Splash label="Checking queue…" />
+    case 'queueing':
     case 'waiting':
-      return (
-        <WaitingRoomPage waitingRoomUrl={config.waitingRoomUrl} onCheckAgain={retry} />
-      )
+      return <WaitingRoomPage waitingRoomUrl={config.waitingRoomUrl} onCheckAgain={checkAgain} />
     case 'error':
-      return <ErrorScreen message={state.message} onRetry={retry} />
+      return <ErrorScreen message={state.message} onRetry={checkAgain} />
     case 'active':
       return route === 'expire' ? (
-        <ExpirePage config={config} />
+        <ExpirePage config={config} token={state.token} session={state.session} />
       ) : (
-        <HomePage config={config} />
+        <HomePage config={config} token={state.token} />
       )
   }
 }

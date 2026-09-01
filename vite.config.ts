@@ -5,9 +5,9 @@ import { defineConfig } from 'vite'
 export default defineConfig({
   plugins: [react()],
   // Optional: avoid CORS in development by proxying API calls to your real
-  // endpoints. If you enable this, point VITE_VALIDATE_URL and
-  // VITE_REVOKE_URL at same-origin paths (e.g. "/api/session/validate")
-  // instead of absolute URLs.
+  // endpoints. If you enable this, point VITE_REQUEST_TOKEN_URL,
+  // VITE_VALIDATE_TOKEN_URL and VITE_INVALIDATE_TOKEN_URL at same-origin
+  // paths (e.g. "/api/token/request") instead of absolute URLs.
   //
   // server: {
   //   proxy: {
